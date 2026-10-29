@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+yfinance
+pandas
+numpy
+scikit-learn
+joblib
+sqlalchemy
+psycopg[binary]
+pydantic
+python-dotenv
+ta
+statsmodels
+prophet

@@ -1,0 +1,28 @@
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: stocks
+      POSTGRES_USER: stockuser
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - stock_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stockuser -d stocks"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://stockuser:${POSTGRES_PASSWORD}@db:5432/stocks
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  stock_data:
