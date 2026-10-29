@@ -4,6 +4,10 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
+from app.config import load_backend_environment
+
+load_backend_environment()
+
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "sqlite:///./stocks.db",

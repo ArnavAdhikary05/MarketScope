@@ -10,6 +10,7 @@ import {
   HistogramSeries,
   type UTCTimestamp,
 } from "lightweight-charts";
+import type { ForecastPoint } from "../api";
 
 type Mode = "candles" | "bars" | "line" | "area";
 
@@ -35,10 +36,9 @@ type Props = {
   bars: PriceBar[];
   symbol: string;
   forecast?: {
-    timestamp: string;
-    predicted_close: number;
     last_bar_timestamp: string;
     last_close: number;
+    future: ForecastPoint[];
   } | null;
 };
 
@@ -228,13 +228,15 @@ export default function StockChart({ bars, symbol, forecast }: Props) {
       const lastTime = Math.floor(
         new Date(forecast.last_bar_timestamp).getTime() / 1000,
       );
-      const futureTime = Math.floor(
-        new Date(forecast.timestamp).getTime() / 1000,
-      );
-      if (Number.isFinite(lastTime) && Number.isFinite(futureTime)) {
+      if (Number.isFinite(lastTime)) {
         forecastSeries.current.setData([
           { time: lastTime as UTCTimestamp, value: forecast.last_close },
-          { time: futureTime as UTCTimestamp, value: forecast.predicted_close },
+          ...forecast.future.map((point) => ({
+            time: Math.floor(
+              new Date(point.timestamp).getTime() / 1000,
+            ) as UTCTimestamp,
+            value: point.predicted_close,
+          })),
         ]);
       } else {
         forecastSeries.current.setData([]);

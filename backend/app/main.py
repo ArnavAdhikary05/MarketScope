@@ -12,7 +12,9 @@ from app.database import Base, engine
 from app.ml.train import train_model
 from app.providers.yahoo import fetch_stock_data
 from app.services.features import create_features
+from app.services.market_calendar import BENCHMARK_SYMBOLS, resolve_exchange
 from app.services.model_comparison import compare_models
+from app.services.news_sentiment import analyze_stock_sentiment
 
 Base.metadata.create_all(bind=engine)
 
@@ -55,6 +57,8 @@ def history(
             "interval": interval,
             "source": "yfinance",
             "data_status": "provider-dependent; delayed data may be returned",
+            "currency": df.attrs.get("currency"),
+            "retrieved_at": datetime.now(timezone.utc).isoformat(),
             "last_observed_at": df["timestamp"].iloc[-1],
             "data": df.to_dict(orient="records"),
         }
@@ -90,19 +94,38 @@ def train(
 def compare(
     symbol: str,
     interval: str = "1d",
-    period: str = "5y",
-    horizon: int = Query(default=1, ge=1, le=20),
+    period: str = "10y",
+    horizon: str = Query(default="3d"),
     model: str = "auto",
+    exchange: str = "auto",
 ):
     symbol = validate_symbol(symbol)
     try:
         market_data = fetch_stock_data(symbol, period=period, interval=interval)
+        exchange_name = resolve_exchange(symbol, exchange)
+        benchmark_history = None
+        benchmark_symbol = BENCHMARK_SYMBOLS[exchange_name]
+        try:
+            benchmark_history = fetch_stock_data(
+                benchmark_symbol,
+                period=period,
+                interval="1d",
+            )
+        except Exception as exc:
+            logger.info(
+                "Benchmark history unavailable for %s (%s): %s",
+                symbol,
+                benchmark_symbol,
+                exc,
+            )
         return compare_models(
             market_data,
             symbol=symbol,
             interval=interval,
             horizon=horizon,
             selected_model=model,
+            exchange=exchange_name,
+            benchmark_history=benchmark_history,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -111,6 +134,27 @@ def compare(
         raise HTTPException(
             status_code=502,
             detail="Model comparison failed; check data availability and server logs",
+        ) from exc
+
+
+@app.get("/api/stocks/{symbol}/sentiment")
+def sentiment(
+    symbol: str,
+    exchange: str = "auto",
+    days: int = Query(default=90, ge=30, le=90),
+):
+    symbol = validate_symbol(symbol)
+    try:
+        if days not in {30, 90}:
+            raise ValueError("News analysis window must be 30 or 90 days")
+        return analyze_stock_sentiment(symbol, exchange, days)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Sentiment analysis failed for %s", symbol)
+        raise HTTPException(
+            status_code=502,
+            detail="Sentiment analysis failed; check provider availability and retry",
         ) from exc
 
 

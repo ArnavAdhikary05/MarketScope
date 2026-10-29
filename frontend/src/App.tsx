@@ -1,22 +1,58 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  Suspense,
+  lazy,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { isAxiosError } from "axios";
 import {
   compareStock,
   getHistory,
+  getSentiment,
   predictStock,
   trainModel,
   type ComparisonResult,
   type ForecastResponse,
   type HistoryResponse,
+  type SentimentResponse,
   type TrainingMetrics,
 } from "./api";
 import StockChart from "./components/StockChart";
 import HelpPage from "./components/HelpPage";
 import "./App.css";
 
+const ForecastChart = lazy(() => import("./components/ForecastChart"));
+const NewsSentimentPanel = lazy(() => import("./components/NewsSentimentPanel"));
+
 const EMPTY_VALIDATION: NonNullable<
   ComparisonResult["models"][string]["validation_predictions"]
 > = [];
+
+const SYMBOL_CURRENCY_SUFFIXES: Record<string, string> = {
+  ".NS": "INR",
+  ".BO": "INR",
+  ".L": "GBp",
+  ".TO": "CAD",
+  ".V": "CAD",
+  ".T": "JPY",
+  ".AX": "AUD",
+  ".HK": "HKD",
+  ".SI": "SGD",
+  ".KS": "KRW",
+  ".KQ": "KRW",
+  ".SS": "CNY",
+  ".SZ": "CNY",
+  ".SA": "BRL",
+  ".PA": "EUR",
+  ".DE": "EUR",
+  ".AS": "EUR",
+  ".MI": "EUR",
+  ".MC": "EUR",
+  ".BR": "EUR",
+  ".SW": "CHF",
+};
 
 function Tooltip({ text, children }: { text: string; children: ReactNode }) {
   return (
@@ -33,8 +69,23 @@ function getErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
-function formatPrice(value: number, ticker: string) {
-  const currency = /\.(NS|BO)$/i.test(ticker) ? "INR" : "USD";
+function formatPrice(value: number, ticker: string, currencyOverride?: string | null) {
+  const suffix = Object.keys(SYMBOL_CURRENCY_SUFFIXES).find((key) =>
+    ticker.toUpperCase().endsWith(key),
+  );
+  const currency =
+    currencyOverride ??
+    (suffix ? SYMBOL_CURRENCY_SUFFIXES[suffix] : "USD");
+  if (currency === "GBp") {
+    return `GBp ${new Intl.NumberFormat(undefined, {
+      maximumFractionDigits: 2,
+    }).format(value)}`;
+  }
+  if (!/^[A-Z]{3}$/.test(currency)) {
+    return `${ticker} ${new Intl.NumberFormat(undefined, {
+      maximumFractionDigits: 2,
+    }).format(value)}`;
+  }
   return new Intl.NumberFormat(undefined, {
     style: "currency",
     currency,
@@ -58,11 +109,17 @@ export default function App() {
     window.location.hash === "#help" ? "help" : "overview",
   );
   const [symbol, setSymbol] = useState("AAPL");
+  const [exchange, setExchange] = useState("auto");
   const [interval, setInterval] = useState("1d");
   const [history, setHistory] = useState<HistoryResponse | null>(null);
   const [forecast, setForecast] = useState<ForecastResponse | null>(null);
   const [comparison, setComparison] = useState<ComparisonResult | null>(null);
-  const [horizon, setHorizon] = useState(1);
+  const [sentiment, setSentiment] = useState<SentimentResponse | null>(null);
+  const [sentimentLoading, setSentimentLoading] = useState(false);
+  const [sentimentError, setSentimentError] = useState("");
+  const [sentimentDays, setSentimentDays] = useState(90);
+  const [horizon, setHorizon] = useState("3d");
+  const [customDays, setCustomDays] = useState("10");
   const [modelChoice, setModelChoice] = useState("auto");
   const [metrics, setMetrics] = useState<TrainingMetrics | null>(null);
   const [activeAction, setActiveAction] = useState<
@@ -83,6 +140,8 @@ export default function App() {
   }, []);
 
   const bars = history?.data ?? [];
+  const marketPrice = (value: number) =>
+    formatPrice(value, history?.symbol ?? symbol, history?.currency);
   const latestBar = bars.at(-1);
   const previousBar = bars.at(-2);
   const change = useMemo(() => {
@@ -173,6 +232,23 @@ export default function App() {
       setError("Enter a stock symbol before comparing models.");
       return;
     }
+    if (interval !== "1d") {
+      setError("Multi-day forecasts require the daily interval. Select Daily and retry.");
+      return;
+    }
+    const horizonToRequest =
+      requestedHorizon === "custom" ? customDays.trim() : requestedHorizon;
+    if (
+      /^\d+$/.test(horizonToRequest) &&
+      (Number(horizonToRequest) < 1 || Number(horizonToRequest) > 132)
+    ) {
+      setError("Custom trading days must be between 1 and 132.");
+      return;
+    }
+    if (requestedHorizon === "custom" && !/^\d+$/.test(horizonToRequest)) {
+      setError("Enter a whole number of trading days between 1 and 132.");
+      return;
+    }
 
     setActiveAction("comparison");
     setError("");
@@ -181,15 +257,16 @@ export default function App() {
     setMetrics(null);
     try {
       const historyPeriod = interval === "1d" ? "1y" : "5d";
-      const comparisonPeriod = interval === "1d" ? "5y" : "60d";
+      const comparisonPeriod = "10y";
       const [marketHistory, result] = await Promise.all([
         getHistory(normalizedSymbol, interval, historyPeriod),
         compareStock(
           normalizedSymbol,
           interval,
           comparisonPeriod,
-          requestedHorizon,
+          horizonToRequest,
           requestedModel,
+          exchange,
         ),
       ]);
       setSymbol(normalizedSymbol);
@@ -204,8 +281,41 @@ export default function App() {
     }
   }
 
+  async function analyzeSentiment(requestedDays = sentimentDays) {
+    setSentimentDays(requestedDays);
+    const normalizedSymbol = symbol.trim().toUpperCase();
+    if (!normalizedSymbol) {
+      setSentimentError("Enter a stock symbol before analyzing news.");
+      return;
+    }
+
+    setSentimentLoading(true);
+    setSentimentError("");
+    try {
+      const result = await getSentiment(normalizedSymbol, exchange, requestedDays);
+      setSymbol(normalizedSymbol);
+      setSentiment(result);
+    } catch (requestError) {
+      setSentimentError(
+        getErrorMessage(requestError, "News sentiment analysis failed."),
+      );
+    } finally {
+      setSentimentLoading(false);
+    }
+  }
+
   const isBusy = activeAction !== null;
-  const supportedHorizons = interval === "1d" ? [1, 5, 10, 20] : [1, 3, 6, 12];
+  const supportedHorizons = [
+    ["1", "1 trading day"],
+    ["3d", "3 trading days"],
+    ["7d", "7 trading days"],
+    ["15d", "15 trading days"],
+    ["30d", "30 trading days (about 1 month)"],
+    ["3m", "3 months"],
+    ["6m", "6 months"],
+    ["custom", "Custom trading days"],
+  ] as const;
+  const finalForecastPoint = comparison?.forecast.future.at(-1);
   const selectedModelResult = comparison?.models[comparison.selected_model];
   const selectedValidation = selectedModelResult?.validation_predictions ?? EMPTY_VALIDATION;
   const validationBaseline = comparison?.models.naive?.validation_predictions ?? EMPTY_VALIDATION;
@@ -246,10 +356,9 @@ export default function App() {
     () =>
       comparison
         ? {
-            timestamp: comparison.forecast.timestamp,
-            predicted_close: comparison.forecast.predicted_close,
             last_bar_timestamp: comparison.last_bar_timestamp,
             last_close: comparison.last_close,
+            future: comparison.forecast.future,
           }
         : null,
     [comparison],
@@ -261,6 +370,8 @@ export default function App() {
     setComparison(null);
     setModelChoice("auto");
     setMetrics(null);
+    setSentiment(null);
+    setSentimentError("");
     setError("");
   }
 
@@ -364,7 +475,32 @@ export default function App() {
                   clearLoadedResults();
                 }}
                 placeholder="AAPL"
+                title="Enter a provider-supported ticker, for example AAPL or RELIANCE.NS."
               />
+            </label>
+            <label className="field">
+              <span>Exchange</span>
+              <select
+                disabled={isBusy}
+                value={exchange}
+                onChange={(event) => {
+                  setExchange(event.target.value);
+                  clearLoadedResults();
+                }}
+                title="Choose the exchange calendar used to compute future trading sessions."
+              >
+                <option value="auto">Auto detect</option>
+                <option value="NASDAQ">NASDAQ</option>
+                <option value="NYSE">NYSE</option>
+                <option value="NSE">NSE</option>
+                <option value="BSE">BSE</option>
+                <option value="LSE">London Stock Exchange</option>
+                <option value="TSX">Toronto Stock Exchange</option>
+                <option value="ASX">Australian Securities Exchange</option>
+                <option value="HKEX">Hong Kong Exchange</option>
+                <option value="JPX">Tokyo Stock Exchange</option>
+                <option value="XETR">Xetra</option>
+              </select>
             </label>
             <label className="field">
               <span>Interval</span>
@@ -373,7 +509,7 @@ export default function App() {
                 value={interval}
                 onChange={(event) => {
                   setInterval(event.target.value);
-                  setHorizon(1);
+                  setHorizon("3d");
                   clearLoadedResults();
                 }}
               >
@@ -418,7 +554,7 @@ export default function App() {
             </div>
             <strong>
               {latestBar
-                ? formatPrice(latestBar.close, history?.symbol ?? symbol)
+                ? marketPrice(latestBar.close)
                 : "—"}
             </strong>
             <small>{latestBar ? formatTimestamp(latestBar.timestamp) : "Load data to begin"}</small>
@@ -427,10 +563,7 @@ export default function App() {
             <div className="metric-heading"><span>Change</span><span className="metric-icon">↕</span></div>
             <strong className={change ? (change.amount >= 0 ? "positive" : "negative") : ""}>
               {change
-                ? `${change.amount >= 0 ? "+" : ""}${formatPrice(
-                    change.amount,
-                    history?.symbol ?? symbol,
-                  )}`
+                ? `${change.amount >= 0 ? "+" : ""}${marketPrice(change.amount)}`
                 : "—"}
             </strong>
             <small>
@@ -485,82 +618,111 @@ export default function App() {
               <p className="eyebrow">CHRONOLOGICAL MODEL VALIDATION</p>
               <h2>Forecast lab</h2>
               <p className="muted">
-                Compare real baseline, statistical, and machine-learning forecasts for this ticker and horizon.
+                Walk-forward model selection and exchange-calendar forecasts. Long horizons require enough daily history.
               </p>
             </div>
             <div className="action-group">
-              <label className="field">
-                <span>Forecast horizon</span>
-                <select
-                  aria-label="Forecast horizon"
-                  disabled={isBusy}
-                  value={horizon}
-                  onChange={(event) => {
-                    const value = Number(event.target.value);
-                    setHorizon(value);
-                    if (comparison) void runComparison(modelChoice, value);
-                  }}
-                >
-                  {supportedHorizons.map((value) => (
-                    <option key={value} value={value}>
-                      {value} {interval === "1d" ? "trading day(s)" : "bar(s)"}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="field">
-                <span>Forecast model</span>
-                <select
-                  aria-label="Forecast model"
-                  disabled={isBusy}
-                  value={modelChoice}
-                  onChange={(event) => {
-                    const value = event.target.value;
-                    setModelChoice(value);
-                    if (comparison) void runComparison(value);
-                  }}
-                >
-                  <option value="auto">Recommended automatically</option>
-                  {Object.entries(comparison?.models ?? {}).map(([name, result]) => (
-                    <option key={name} value={name} disabled={!result.eligible}>
-                      {name.replaceAll("_", " ")}
-                      {!result.eligible ? " (unavailable)" : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <Tooltip text="Evaluate eligible models on chronological folds and generate a forecast for the chosen horizon.">
-                <button
-                  className="button button-primary"
-                  disabled={isBusy}
-                  onClick={() => void runComparison()}
-                  type="button"
-                >
-                  {activeAction === "comparison" ? "Comparing…" : "Compare & forecast"}
-                </button>
-              </Tooltip>
-              <Tooltip text="Fit the Random Forest model and evaluate it on a chronological holdout period.">
-                <button
-                  className="button button-secondary"
-                  disabled={isBusy}
-                  onClick={() => void train()}
-                  type="button"
-                >
-                  {activeAction === "training" ? "Training…" : "Train model"}
-                </button>
-              </Tooltip>
-              <Tooltip text="Generate the Random Forest next-bar estimate. Train the model first if no saved model exists.">
-                <button
-                  className="button button-primary"
-                  disabled={isBusy}
-                  onClick={() => void predict()}
-                  type="button"
-                >
-                  {activeAction === "forecast" ? "Predicting…" : "Predict next bar"}
-                </button>
-              </Tooltip>
+              <div className="forecast-options">
+                <label className="field forecast-horizon-field">
+                  <span>Forecast horizon</span>
+                  <select
+                    aria-label="Forecast horizon"
+                    disabled={isBusy}
+                    value={horizon}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setHorizon(value);
+                      if (value === "custom") {
+                        setComparison(null);
+                        setForecast(null);
+                      } else if (comparison) {
+                        void runComparison(modelChoice, value);
+                      }
+                    }}
+                  >
+                    {supportedHorizons.map(([value, label]) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {horizon === "custom" && (
+                  <label className="field custom-days-field">
+                    <span>Trading days (1–132)</span>
+                    <input
+                      aria-label="Custom trading days"
+                      disabled={isBusy}
+                      inputMode="numeric"
+                      max="132"
+                      min="1"
+                      onChange={(event) => setCustomDays(event.target.value)}
+                      type="number"
+                      value={customDays}
+                    />
+                  </label>
+                )}
+                <label className="field forecast-model-field">
+                  <span>Forecast model</span>
+                  <select
+                    aria-label="Forecast model"
+                    disabled={isBusy || interval !== "1d"}
+                    value={modelChoice}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setModelChoice(value);
+                      if (comparison) void runComparison(value);
+                    }}
+                  >
+                    <option value="auto">Automatically Recommend Best Model</option>
+                    {Object.entries(comparison?.models ?? {}).map(([name, result]) => (
+                      <option key={name} value={name} disabled={!result.eligible}>
+                        {name.replaceAll("_", " ")}
+                        {!result.eligible ? " (unavailable)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="forecast-actions">
+                <Tooltip text="Evaluate eligible models on chronological folds and generate a forecast for the chosen horizon.">
+                  <button
+                    className="button button-primary"
+                    disabled={isBusy || interval !== "1d"}
+                    onClick={() => void runComparison()}
+                    type="button"
+                  >
+                    {activeAction === "comparison" ? "Comparing…" : "Compare & forecast"}
+                  </button>
+                </Tooltip>
+                <Tooltip text="Fit the Random Forest model and evaluate it on a chronological holdout period.">
+                  <button
+                    className="button button-secondary"
+                    disabled={isBusy}
+                    onClick={() => void train()}
+                    type="button"
+                  >
+                    {activeAction === "training" ? "Training…" : "Train model"}
+                  </button>
+                </Tooltip>
+                <Tooltip text="Generate the Random Forest next-bar estimate. Train the model first if no saved model exists.">
+                  <button
+                    className="button button-primary"
+                    disabled={isBusy}
+                    onClick={() => void predict()}
+                    type="button"
+                  >
+                    {activeAction === "forecast" ? "Predicting…" : "Predict next bar"}
+                  </button>
+                </Tooltip>
+              </div>
             </div>
           </div>
+          {interval !== "1d" && (
+            <p className="unsupported-forecast-note" role="status">
+              Multi-day horizons use daily observations and exchange sessions. Select Daily to compare models and generate these forecasts.
+            </p>
+          )}
 
           {comparison && (
             <div className="comparison-block">
@@ -573,18 +735,70 @@ export default function App() {
                 </span>
               </div>
               <p className="evaluation-note">
-                {comparison.selection_objective}. Scores use {comparison.validation_folds} expanding chronological folds;
-                {` `}selected-model MAE {selectedModelResult?.metrics?.mae.toFixed(4) ?? "unavailable"} vs naive MAE{" "}
-                {comparison.models.naive?.metrics?.mae.toFixed(4) ?? "unavailable"}.
+                {comparison.selection_objective}. Model selection uses {comparison.validation_folds} expanding chronological validation folds;
+                {` `}final test results use {comparison.test_folds} later rolling-origin folds and are not used for selection.
               </p>
+              <div className="selected-model-metrics">
+                <div>
+                  <span>Selected model</span>
+                  <strong>{comparison.selected_model.replaceAll("_", " ")}</strong>
+                </div>
+                <div>
+                  <span>Validation path MAE</span>
+                  <strong>{selectedModelResult?.horizon_metrics?.mae.toFixed(4) ?? "Unavailable"}</strong>
+                </div>
+                <div>
+                  <span>Validation path RMSE</span>
+                  <strong>{selectedModelResult?.horizon_metrics?.rmse.toFixed(4) ?? "Unavailable"}</strong>
+                </div>
+                <div>
+                  <span>Directional accuracy</span>
+                  <strong>
+                    {selectedModelResult?.horizon_metrics
+                      ? `${(selectedModelResult.horizon_metrics.directional_accuracy * 100).toFixed(1)}%`
+                      : "Unavailable"}
+                  </strong>
+                </div>
+                <div>
+                  <span>Naive validation path MAE</span>
+                  <strong>{comparison.models.naive?.horizon_metrics?.mae.toFixed(4) ?? "Unavailable"}</strong>
+                </div>
+                <div>
+                  <span>Final test MAE</span>
+                  <strong>{selectedModelResult?.test_metrics?.mae.toFixed(4) ?? "Unavailable"}</strong>
+                </div>
+                <div>
+                  <span>Final test RMSE</span>
+                  <strong>{selectedModelResult?.test_metrics?.rmse.toFixed(4) ?? "Unavailable"}</strong>
+                </div>
+                <div>
+                  <span>Final test baseline</span>
+                  <strong>
+                    {selectedModelResult?.test_beats_naive === undefined
+                      ? "Unavailable"
+                      : selectedModelResult.test_beats_naive
+                        ? "Beat naive"
+                        : "Did not beat naive"}
+                  </strong>
+                </div>
+                <div>
+                  <span>Baseline comparison</span>
+                  <strong>
+                    {comparison.selected_model_beats_naive
+                      ? "Beat naive"
+                      : "Did not beat naive"}
+                  </strong>
+                </div>
+              </div>
               <div className="comparison-table-wrap">
                 <table className="comparison-table">
                   <thead>
                     <tr>
                       <th>Model</th>
                       <th>Family / status</th>
-                      <th>Validation MAE</th>
-                      <th>RMSE</th>
+                      <th>Validation path MAE</th>
+                      <th>Validation path RMSE</th>
+                      <th>Final test MAE</th>
                       <th>sMAPE</th>
                       <th>Direction</th>
                     </tr>
@@ -603,12 +817,13 @@ export default function App() {
                         >
                           <td>{name.replaceAll("_", " ")}</td>
                           <td>{result.family} · {result.status}</td>
-                          <td>{result.metrics?.mae.toFixed(4) ?? result.reason ?? "—"}</td>
-                          <td>{result.metrics?.rmse.toFixed(4) ?? "—"}</td>
-                          <td>{result.metrics ? `${result.metrics.smape.toFixed(2)}%` : "—"}</td>
+                          <td>{result.horizon_metrics?.mae.toFixed(4) ?? result.reason ?? "—"}</td>
+                          <td>{result.horizon_metrics?.rmse.toFixed(4) ?? "—"}</td>
+                          <td>{result.test_metrics?.mae.toFixed(4) ?? "—"}</td>
+                          <td>{result.horizon_metrics ? `${result.horizon_metrics.smape.toFixed(2)}%` : "—"}</td>
                           <td>
-                            {result.metrics
-                              ? `${(result.metrics.directional_accuracy * 100).toFixed(0)}%`
+                            {result.horizon_metrics
+                              ? `${(result.horizon_metrics.directional_accuracy * 100).toFixed(0)}%`
                               : "—"}
                           </td>
                         </tr>
@@ -618,7 +833,7 @@ export default function App() {
               </div>
               {selectedValidation.length > 0 && (
                 <div className="validation-chart">
-                  <h3>Out-of-sample actual vs forecast</h3>
+                  <h3>Walk-forward validation actual vs forecast</h3>
                   {validationPlot && (
                     <div className="validation-plot-wrap">
                       <div className="validation-legend" aria-hidden="true">
@@ -631,16 +846,16 @@ export default function App() {
                         viewBox="0 0 760 220"
                         preserveAspectRatio="none"
                         role="img"
-                        aria-label="Held-out actual prices compared with selected model and naive forecasts"
+                        aria-label="Walk-forward validation actual prices compared with selected model and naive forecasts"
                       >
                         <line x1="40" y1="28" x2="740" y2="28" className="plot-grid" />
                         <line x1="40" y1="106" x2="740" y2="106" className="plot-grid" />
                         <line x1="40" y1="184" x2="740" y2="184" className="plot-grid" />
                         <text x="4" y="31" className="plot-label">
-                          {formatPrice(validationPlot.maximum, symbol)}
+                          {marketPrice(validationPlot.maximum)}
                         </text>
                         <text x="4" y="187" className="plot-label">
-                          {formatPrice(validationPlot.minimum, symbol)}
+                          {marketPrice(validationPlot.minimum)}
                         </text>
                         <polyline points={validationPlot.naive} className="plot-naive" />
                         <polyline points={validationPlot.actual} className="plot-actual" />
@@ -668,13 +883,12 @@ export default function App() {
                     {selectedValidation.map((point, index) => (
                       <div className="validation-point" key={point.timestamp}>
                         <span>{formatTimestamp(point.timestamp)}</span>
-                        <span>Actual {formatPrice(point.actual, symbol)}</span>
-                        <span>Forecast {formatPrice(point.predicted, symbol)}</span>
+                        <span>Actual {marketPrice(point.actual)}</span>
+                        <span>Forecast {marketPrice(point.predicted)}</span>
                         <span>
                           Naive{" "}
-                          {formatPrice(
+                          {marketPrice(
                             validationBaseline[index]?.predicted ?? point.actual,
-                            symbol,
                           )}
                         </span>
                       </div>
@@ -687,6 +901,90 @@ export default function App() {
                 </div>
               )}
               <p className="evaluation-note">{comparison.data_note}</p>
+              {comparison.factor_analysis && (
+                <div className="forecast-factor-analysis">
+                  <div className="evaluation-heading">
+                    <h3>Forecast factor analysis</h3>
+                    <span className="evaluation-badge">
+                      Target: daily closing price only
+                    </span>
+                  </div>
+                  <p className="evaluation-note">
+                    Inputs are restricted to information available at each training origin. Future OHLC values are not generated.
+                  </p>
+                  {comparison.factor_analysis.price_and_technical.feature_importance.length > 0 ? (
+                    <div className="feature-importance-list">
+                      {comparison.factor_analysis.price_and_technical.feature_importance.map((feature) => (
+                        <div className="feature-importance-row" key={feature.feature}>
+                          <span>{feature.feature.replaceAll("_", " ")}</span>
+                          <i>
+                            <b style={{ width: `${feature.importance * 100}%` }} />
+                          </i>
+                          <strong>{(feature.importance * 100).toFixed(1)}%</strong>
+                        </div>
+                      ))}
+                      <small>
+                        Importance method: {comparison.factor_analysis.price_and_technical.feature_importance[0].method}.
+                      </small>
+                    </div>
+                  ) : (
+                    <p className="sentiment-empty">
+                      The selected statistical model does not expose comparable technical-feature importance.
+                    </p>
+                  )}
+                  <div className="factor-availability-list">
+                    {Object.entries(comparison.factor_analysis)
+                      .filter(
+                        ([name]) =>
+                          name !== "price_and_technical" &&
+                          name !== "volume_liquidity",
+                      )
+                      .map(([name, factor]) => (
+                        <span
+                          className={
+                            factor.available
+                              ? "factor-available"
+                              : "factor-unavailable"
+                          }
+                          key={name}
+                        >
+                          {name.replaceAll("_", " ")} ·{" "}
+                          {factor.available
+                            ? `${factor.used_by_selected_model.length} inputs selected`
+                            : "no leakage-safe historical inputs"}
+                        </span>
+                      ))}
+                    <span className="factor-available">
+                      Price/technical · {comparison.factor_analysis.price_and_technical.used_by_selected_model.length} inputs used
+                    </span>
+                    <span
+                      className={
+                        comparison.factor_analysis.volume_liquidity.available
+                          ? "factor-available"
+                          : "factor-unavailable"
+                      }
+                    >
+                      Volume/liquidity ·{" "}
+                      {comparison.factor_analysis.volume_liquidity.used_by_selected_model.length} inputs used
+                    </span>
+                  </div>
+                  <small className="sentiment-correlation-note">
+                    {comparison.factor_analysis.price_and_technical.limitation}{" "}
+                    {comparison.factor_analysis.volume_liquidity.limitation}{" "}
+                    {comparison.factor_analysis.fundamentals.limitation}{" "}
+                    {comparison.factor_analysis.news_sentiment.limitation}{" "}
+                    {comparison.factor_analysis.corporate_events.limitation}
+                  </small>
+                </div>
+              )}
+              <Suspense fallback={<p className="activity-message">Loading interactive forecast chart…</p>}>
+                <ForecastChart
+                  bars={bars}
+                  symbol={symbol}
+                  future={comparison.forecast.future}
+                  lastClose={comparison.last_close}
+                />
+              </Suspense>
             </div>
           )}
 
@@ -694,11 +992,11 @@ export default function App() {
             <div className="forecast-result">
               <div>
                 <span className="result-label">
-                  {comparison.horizon}-bar forecast ·{" "}
+                  {comparison.horizon_label} ·{" "}
                   {comparison.selected_model.replaceAll("_", " ")}
                 </span>
                 <strong>
-                  {formatPrice(comparison.forecast.predicted_close, symbol)}
+                  {marketPrice(comparison.forecast.predicted_close)}
                 </strong>
                 <small>
                   Target time: {formatTimestamp(comparison.forecast.timestamp)}
@@ -706,7 +1004,7 @@ export default function App() {
               </div>
               <div>
                 <span className="result-label">Last observed close</span>
-                <strong>{formatPrice(comparison.last_close, symbol)}</strong>
+                <strong>{marketPrice(comparison.last_close)}</strong>
                 <small>
                   Observed: {formatTimestamp(comparison.last_bar_timestamp)}
                 </small>
@@ -722,19 +1020,41 @@ export default function App() {
                   Generated: {formatTimestamp(comparison.generated_at)}
                 </small>
               </div>
+              <div>
+                <span className="result-label">80% empirical validation range</span>
+                {finalForecastPoint?.lower_80 !== null &&
+                finalForecastPoint?.upper_80 !== null &&
+                finalForecastPoint ? (
+                  <>
+                    <strong className="generated-value">
+                      {marketPrice(finalForecastPoint.lower_80)}{" "}
+                      –{" "}
+                      {marketPrice(finalForecastPoint.upper_80)}
+                    </strong>
+                    <small>
+                      Based on {finalForecastPoint.calibration_samples} walk-forward errors; not a guarantee.
+                    </small>
+                  </>
+                ) : (
+                  <>
+                    <strong className="generated-value">Unavailable</strong>
+                    <small>Insufficient validation residuals for this estimate.</small>
+                  </>
+                )}
+              </div>
             </div>
           ) : forecast ? (
             <div className="forecast-result">
               <div>
                 <span className="result-label">Predicted next close</span>
                 <strong>
-                  {formatPrice(forecast.predicted_next_close, symbol)}
+                  {marketPrice(forecast.predicted_next_close)}
                 </strong>
                 <small>Forecast from {forecast.model}</small>
               </div>
               <div>
                 <span className="result-label">Reference close</span>
-                <strong>{formatPrice(forecast.last_close, symbol)}</strong>
+                <strong>{marketPrice(forecast.last_close)}</strong>
                 <small>Last bar: {formatTimestamp(forecast.last_bar_timestamp)}</small>
               </div>
               <div>
@@ -769,6 +1089,17 @@ export default function App() {
             </div>
           )}
         </section>
+
+        <Suspense fallback={<p className="activity-message">Loading news sentiment tools…</p>}>
+          <NewsSentimentPanel
+            symbol={symbol}
+            data={sentiment}
+            loading={sentimentLoading}
+            error={sentimentError}
+            days={sentimentDays}
+            onAnalyze={(days) => void analyzeSentiment(days)}
+          />
+        </Suspense>
 
         <footer className="app-footer">
           <span>MarketScope AI · Educational research prototype</span>

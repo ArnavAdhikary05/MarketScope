@@ -9,6 +9,11 @@ sqlalchemy
 psycopg[binary]
 pydantic
 python-dotenv
+requests
+finvizfinance
+scipy
 ta
 statsmodels
 prophet
+pandas-market-calendars
+xgboost

@@ -50,6 +50,14 @@ export default function HelpPage({ onBack }: Props) {
             </span>
           </li>
           <li>
+            <strong>Choose an exchange calendar.</strong>
+            <span>
+              Auto detect uses the Indian ticker suffix or Yahoo Finance exchange
+              metadata for international tickers. You may select an available
+              exchange explicitly if detection is unavailable.
+            </span>
+          </li>
+          <li>
             <strong>Select an interval and load history.</strong>
             <span>
               Daily loads approximately one year for the chart; 5-minute and
@@ -68,10 +76,12 @@ export default function HelpPage({ onBack }: Props) {
           <li>
             <strong>Compare models and forecast.</strong>
             <span>
-              Pick a forecast horizon, leave the model on automatic recommendation
-              or choose an eligible model after a comparison, then select
-              <em> Compare &amp; forecast</em>. The comparison and new forecast are
-              calculated together.
+              Pick a 1-trading-day horizon, a 3-day, 7-day, 15-day, or 30-day
+              calendar window, a 3- or 6-month window, or enter a custom count
+              of 1–132 trading sessions.
+              Select Daily data, leave the mode on automatic recommendation or
+              choose an eligible model after a comparison, then use
+              <em> Compare &amp; forecast</em>.
             </span>
           </li>
           <li>
@@ -101,23 +111,37 @@ export default function HelpPage({ onBack }: Props) {
           <article className="help-card">
             <h3>Forecast horizon</h3>
             <p>
-              Daily choices are 1, 5, 10, or 20 trading bars; intraday choices
-              are 1, 3, 6, or 12 bars. Calendar/session timing is approximate.
+            Forecast options include 1, 3, 7, 15, and 30 trading sessions,
+            3 or 6 calendar months, and custom counts of 1–132 sessions.
+            Dates come from the selected exchange calendar. Press Compare
+            &amp; forecast after entering a custom number of sessions.
+            </p>
+          </article>
+          <article className="help-card">
+            <h3>News sentiment</h3>
+            <p>
+              Analyze recent provider news over a 30- or 90-day window. Finviz
+              is tried first and Yahoo Finance is the fallback. Groq
+              classifications require a backend-only GROQ_API_KEY. Sentiment
+              and next-session return correlation are exploratory and do not
+              establish causation.
             </p>
           </article>
           <article className="help-card">
             <h3>Forecast model</h3>
             <p>
-              Automatic mode selects from eligible models using validation MAE
-              and the naive-baseline rule. Manual choices run that model after
-              the comparison is recalculated.
+              Automatically Recommend Best Model is the default. It selects by
+              walk-forward MAE and requires a non-naive model to beat the naive
+              baseline. Choosing an eligible model manually reruns the comparison
+              and forecast for that model.
             </p>
           </article>
           <article className="help-card">
             <h3>Compare &amp; forecast</h3>
             <p>
-              Evaluates candidates on shared chronological validation origins,
-              displays their metrics, and forecasts using the selected model.
+              Evaluates naive baselines, Ridge, Random Forest, Extra Trees,
+              HistGradientBoosting, XGBoost, ARIMA, SARIMA, Exponential Smoothing,
+              Prophet, and PyTorch LSTM when dependencies and data permit.
             </p>
           </article>
           <article className="help-card">
@@ -152,7 +176,10 @@ export default function HelpPage({ onBack }: Props) {
           <p><strong>Random Forest and Extra Trees:</strong> tree ensembles trained on lagged/rolling features.</p>
           <p><strong>HistGradientBoosting:</strong> a boosted-tree regression model.</p>
           <p><strong>ARIMA:</strong> a statistical autoregressive integrated moving-average model.</p>
-          <p><strong>Prophet:</strong> a trend/seasonality model when its optional dependency is available and the data is eligible.</p>
+          <p><strong>SARIMA and Exponential Smoothing:</strong> classical seasonal/trend models evaluated against the same validation dates.</p>
+          <p><strong>XGBoost:</strong> gradient-boosted trees over leakage-free lagged returns; unavailable if its package cannot load.</p>
+          <p><strong>LSTM:</strong> PyTorch sequence model with training-only return scaling and early stopping; optional and unavailable when PyTorch is not installed.</p>
+          <p><strong>Prophet:</strong> a trend/seasonality model when its dependency is available and data is eligible.</p>
         </div>
         <div className="help-cards metric-help-grid">
           <article className="help-card">
@@ -182,8 +209,9 @@ export default function HelpPage({ onBack }: Props) {
           <li>Yahoo Finance data can be delayed, incomplete, or unavailable; this app does not guarantee a live feed.</li>
           <li>Validation scores describe historical folds and do not guarantee future accuracy or investment returns.</li>
           <li>Automatic selection uses validation MAE and requires advanced candidates to beat the naive baseline; otherwise it can recommend the naive model.</li>
-          <li>Daily future timestamps account for weekdays, not exchange holidays. Intraday future timestamps do not model exchange sessions.</li>
-          <li>Prediction intervals, calibrated uncertainty, and trading backtests are not currently provided by this workflow.</li>
+          <li>Forecast dates use supported US, Indian, UK, Canadian, Australian, Hong Kong, Japanese, and German session calendars. Automatic exchange lookup depends on ticker suffixes or Yahoo Finance metadata; select an exchange explicitly if lookup fails.</li>
+          <li>The 80% interval is an empirical walk-forward residual range. It is not a guaranteed coverage probability; it may be unavailable when too few validation folds can be formed.</li>
+          <li>Forecast comparisons require daily bars. Intraday charts are supported, but multi-day intraday model comparisons are not.</li>
         </ul>
       </section>
 

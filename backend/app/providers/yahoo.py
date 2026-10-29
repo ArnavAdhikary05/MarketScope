@@ -1,8 +1,60 @@
 
+import logging
 import re
 
 import pandas as pd
 import yfinance as yf
+
+logger = logging.getLogger(__name__)
+
+
+FALLBACK_CURRENCIES = {
+    ".NS": "INR",
+    ".BO": "INR",
+    ".L": "GBp",
+    ".TO": "CAD",
+    ".V": "CAD",
+    ".T": "JPY",
+    ".AX": "AUD",
+    ".HK": "HKD",
+    ".SI": "SGD",
+    ".KS": "KRW",
+    ".KQ": "KRW",
+    ".SS": "CNY",
+    ".SZ": "CNY",
+    ".SA": "BRL",
+    ".PA": "EUR",
+    ".DE": "EUR",
+    ".AS": "EUR",
+    ".MI": "EUR",
+    ".MC": "EUR",
+    ".BR": "EUR",
+    ".SW": "CHF",
+}
+
+
+def _quote_currency(ticker: yf.Ticker, symbol: str) -> str | None:
+    try:
+        fast_info = ticker.fast_info
+        currency = getattr(fast_info, "currency", None)
+        if not currency and hasattr(fast_info, "get"):
+            currency = fast_info.get("currency")
+        if isinstance(currency, str) and re.fullmatch(r"[A-Za-z]{3}", currency):
+            return currency.upper()
+        if currency == "GBp":
+            return "GBp"
+    except Exception:
+        logger.info("Yahoo Finance currency metadata unavailable for %s", symbol)
+
+    normalized_symbol = symbol.upper()
+    return next(
+        (
+            currency
+            for suffix, currency in FALLBACK_CURRENCIES.items()
+            if normalized_symbol.endswith(suffix)
+        ),
+        "USD" if "." not in normalized_symbol else None,
+    )
 
 
 def fetch_stock_data(
@@ -71,4 +123,6 @@ def fetch_stock_data(
     if df.empty:
         raise ValueError(f"No valid OHLCV observations returned for {symbol}")
 
+    df.attrs["currency"] = _quote_currency(ticker, symbol)
+    df.attrs["source"] = "Yahoo Finance"
     return df
